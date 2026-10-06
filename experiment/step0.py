@@ -1,6 +1,7 @@
 import json
 import re
 from collections import Counter
+from datetime import datetime, timezone
 
 import requests
 
@@ -65,6 +66,7 @@ RECERT_FIELDS = [
     "RequestStatus",
     "RequestResult",
     "UpdatedDate",
+    "ObjectId",
 ]
 
 
@@ -90,6 +92,22 @@ def base_address(r):
     if unit and addr.endswith(" " + unit):
         addr = addr[: -len(unit) - 1]
     return addr
+
+
+SUFFIXES = {"AVE": "AV"}
+
+
+def norm_address(addr):
+    """Upper case, single spaces and the recert layer's stree suffixes."""
+    words = (addr or "").upper().split()
+    return " ".join(SUFFIXES.get(w, w) for w in words)
+
+
+def ms_to_date(ms):
+    """ArcGIS date are in milliseconds"""
+    if ms is None:
+        return None
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date().isoformat()
 
 
 def query(url, where, fields, geometry=False):
@@ -162,10 +180,51 @@ def building_summary(parent_folio, fields):
     }
 
 
+def recert_records(building, fields):
+    """Recertification records of the building, by folio or by tower address."""
+    all_folios = [building["parent_folio"]] + building["folios"]
+    in_list = ",".join(f"'{f}'" for f in all_folios)
+    by_folio = query(LAYERS["recert"], f"FolioNumber IN({in_list})", fields)
+
+    addresses = [norm_address(t) for t in building["towers"]]
+    in_list = ",".join(f"'{current_address}'" for current_address in addresses)
+    by_address = query(LAYERS["recert"], f"Address IN({in_list})", fields)
+
+    records = {}
+    for f in by_folio + by_address:
+        r = f["attributes"]
+        if r["ObjectId"] in records:  # found in both ways: keep only one
+            continue
+        if r["FolioNumber"] == building["parent_folio"]:
+            r["matched_on"] = "master"
+        elif r["FolioNumber"] in all_folios:
+            r["matched_on"] = "unit"
+        else:
+            r["matched_on"] = "address"
+        for key in ("SubmittedDate", "PlanStatusDate"):
+            r[key] = ms_to_date(r.get(key))
+        records[r["ObjectId"]] = r
+    return list(records.values())
+
+
+def recert_by_tower(building, records):
+    """Latest recertification of each tower, None if there is no record."""
+    latest = {}
+    for r in sorted(records, key=lambda r: r["RecertificateYear"] or ""):
+        latest[norm_address(r["Address"])] = {
+            "year": r["RecertificateYear"],
+            "status": r["CertificationStatus"],
+        }
+    return {t: latest.get(norm_address(t)) for t in building["towers"]}
+
+
 if __name__ == "__main__":
     fields = safe_fields(LAYERS["property"], PROPERTY_FIELDS)
     building = building_summary("0142070010001", fields)
     if not building:
         raise SystemExit("Sin resultados para ese folio")
+    recert_fields = safe_fields(LAYERS["recert"], RECERT_FIELDS)
+    building["recert"] = recert_records(building, recert_fields)
+    building["recert_by_tower"] = recert_by_tower(building, building["recert"])
     building["folios"] = building["folios"][:5]
     print(json.dumps(building, indent=2, ensure_ascii=False))
