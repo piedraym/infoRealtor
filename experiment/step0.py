@@ -10,11 +10,11 @@ import requests
 # ---------------------------------------------------------------------------
 
 COUNTY = "https://services.arcgis.com/8Pc9XBTAsYuxx9Ny/ArcGIS/rest/services"
-CITY = "https://services1.arcgis.com/CvuPhqcTQpZPT9qY/arcgis/rest/services"
+CITY = "https://gis.miami.gov/gis/rest/services"
 
 LAYERS = {
     "property": f"{COUNTY}/PaGISView_gdb/FeatureServer/0",
-    "recert": f"{CITY}/40_Year_Recertification/FeatureServer/0",
+    "recert": f"{CITY}/SmartCities/Recertification_40Years/MapServer/0",
     # "permits": f"{CITY}/Building_Permits_Since_2014/FeatureServer/0",
     # "open_violations": f"{COUNTY}/Open_Building_Violations/FeatureServer/0",
     # "closed_violations_5y": f"{COUNTY}/Closed_Building_Violations_(Past_5_years)/FeatureServer/0",
@@ -26,7 +26,7 @@ LAYERS = {
 # permitido citando la fuente). Las del condado hay que revisarlas una a una en
 # su página del portal (gis-mdc.opendata.arcgis.com) antes de cobrar.
 LICENSES = {
-    "recert": "CC BY 4.0 (Ciudad de Miami)",
+    "recert": "Pendiente de verificar (servidor GIS de la Ciudad)",
     "permits": "CC BY 4.0 (Ciudad de Miami)",
 }
 
@@ -66,7 +66,7 @@ RECERT_FIELDS = [
     "RequestStatus",
     "RequestResult",
     "UpdatedDate",
-    "ObjectId",
+    "OBJECTID",
 ]
 
 
@@ -96,11 +96,21 @@ def base_address(r):
 
 SUFFIXES = {"AVE": "AV"}
 
+STREET_NAMES = {
+    "N RIVER DR": "NORTH RIVER DR",
+    "S RIVER DR": "SOUTH RIVER DR",
+    "S TAMIAMI CANAL DR": "SOUTH TAMIAMI CANAL DR",
+}
+
 
 def norm_address(addr):
-    """Upper case, single spaces and the recert layer's stree suffixes."""
+    """Upper case, single spaces and the recert layer's street spelling"."""
     words = (addr or "").upper().split()
-    return " ".join(SUFFIXES.get(w, w) for w in words)
+    addr = " ".join(SUFFIXES.get(w, w) for w in words)
+    for short, full in STREET_NAMES.items():
+        if addr.endswith(" " + short):
+            addr = addr[: -len(short)] + full
+    return addr
 
 
 def ms_to_date(ms):
@@ -193,7 +203,7 @@ def recert_records(building, fields):
     records = {}
     for f in by_folio + by_address:
         r = f["attributes"]
-        if r["ObjectId"] in records:  # found in both ways: keep only one
+        if r["OBJECTID"] in records:  # found in both ways: keep only one
             continue
         if r["FolioNumber"] == building["parent_folio"]:
             r["matched_on"] = "master"
@@ -203,16 +213,17 @@ def recert_records(building, fields):
             r["matched_on"] = "address"
         for key in ("SubmittedDate", "PlanStatusDate"):
             r[key] = ms_to_date(r.get(key))
-        records[r["ObjectId"]] = r
+        records[r["OBJECTID"]] = r
     return list(records.values())
 
 
 def recert_by_tower(building, records):
     """Latest recertification of each tower, None if there is no record."""
     latest = {}
-    for r in sorted(records, key=lambda r: r["RecertificateYear"] or ""):
+    for r in sorted(records, key=lambda r: r["RecertificateYear"] or 0):
         latest[norm_address(r["Address"])] = {
-            "year": r["RecertificateYear"],
+            "status_date": r["PlanStatusDate"],
+            "year_due": r["RecertificateYear"],
             "status": r["CertificationStatus"],
         }
     return {t: latest.get(norm_address(t)) for t in building["towers"]}
@@ -220,7 +231,7 @@ def recert_by_tower(building, records):
 
 if __name__ == "__main__":
     fields = safe_fields(LAYERS["property"], PROPERTY_FIELDS)
-    building = building_summary("0142070010001", fields)
+    building = building_summary("0131341070001", fields)
     if not building:
         raise SystemExit("Sin resultados para ese folio")
     recert_fields = safe_fields(LAYERS["recert"], RECERT_FIELDS)
