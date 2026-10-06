@@ -3,12 +3,17 @@
 import csv
 import re
 from collections import Counter, defaultdict
-from datetime import date
 from pathlib import Path
 
-from step0 import LAYERS, base_address, norm_address, query
-
-THIS_YEAR = date.today().year
+from step0 import (
+    LAYERS,
+    THIS_YEAR,
+    base_address,
+    latest_record,
+    norm_address,
+    query,
+    recert_label,
+)
 
 # 1. All condo units in the City of Miami, grouped by parent folio
 units = [
@@ -51,6 +56,7 @@ recert = [
             "CertificationStatus",
             "RecertificateYear",
             "PlanStatus",
+            "PlanStatusDate",
         ],
     )
 ]
@@ -59,26 +65,6 @@ recert_by_address = defaultdict(list)
 for r in recert:
     recert_by_folio[r["FolioNumber"]].append(r)
     recert_by_address[norm_address(r["Address"])].append(r)
-
-# When records share the latest year, the best status wins
-PRIORITY = {"Completed": 3, "Exempted": 2, "Pending": 1, "Canceled": 0}
-
-PENDING_GROUPS = {
-    "In Review": "city review",
-    "Prescreen": "city review",
-    "Submitted": "city review",
-    "Approved": "city review",
-    "Permit Issued": "city review",
-    "Final": "city review",
-    "Applicant Corrections": "corrections",
-    "Prescreen Corrections": "corrections",
-    "Applicant Upload": "corrections",
-    "Incomplete": "corrections",
-    "Cancelled": "stalled",
-    "Expired": "stalled",
-    "Inactive": "stalled",
-    "Hold": "stalled",
-}
 
 
 def condo_status(parent, c):
@@ -90,18 +76,7 @@ def condo_status(parent, c):
         records += recert_by_address[tower]
     if not records:
         return None
-    latest = max(
-        records,
-        key=lambda r: (
-            r["RecertificateYear"] or 0,
-            PRIORITY.get(r["CertificationStatus"], -1),
-        ),
-    )
-    status = latest["CertificationStatus"]
-    if status == "Pending":
-        group = PENDING_GROUPS.get(latest["PlanStatus"], "other")
-        return f"Pending: {group}"
-    return status
+    return recert_label(latest_record(records))
 
 
 def age_group(age):
@@ -149,9 +124,11 @@ for parent, c in condos.items():
 print(f"{len(units)} units, {len(condos)} condos\n")
 COLUMNS = (
     "Completed",
+    "Completed: overdue",
     "Exempted",
     "Pending: city review",
     "Pending: corrections",
+    "Pending: corrections >1y",
     "Pending: stalled",
     "Pending: other",
     "Canceled",

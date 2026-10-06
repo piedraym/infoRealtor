@@ -1,7 +1,7 @@
 import json
 import re
-from collections import Counter
-from datetime import datetime, timezone
+from collections import Counter, defaultdict
+from datetime import date, datetime, timezone
 
 import requests
 
@@ -104,7 +104,7 @@ STREET_NAMES = {
 
 
 def norm_address(addr):
-    """Upper case, single spaces and the recert layer's street spelling"."""
+    """Upper case, single spaces and the recert layer's street spelling."""
     words = (addr or "").upper().split()
     addr = " ".join(SUFFIXES.get(w, w) for w in words)
     for short, full in STREET_NAMES.items():
@@ -118,6 +118,82 @@ def ms_to_date(ms):
     if ms is None:
         return None
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Recertification traffic light
+# ---------------------------------------------------------------------------
+
+THIS_YEAR = date.today().year
+
+# When records share the latest year, the best status wins
+PRIORITY = {"Completed": 3, "Exempted": 2, "Pending": 1, "Canceled": 0}
+
+# Pending records split by who has to act next
+PENDING_GROUPS = {
+    "In Review": "city review",
+    "Prescreen": "city review",
+    "Submitted": "city review",
+    "Approved": "city review",
+    "Permit Issued": "city review",
+    "Final": "city review",
+    "Applicant Corrections": "corrections",
+    "Prescreen Corrections": "corrections",
+    "Applicant Upload": "corrections",
+    "Incomplete": "corrections",
+    "Cancelled": "stalled",
+    "Expired": "stalled",
+    "Inactive": "stalled",
+    "Hold": "stalled",
+}
+
+STUCK_DAYS = 365  # corrections older than this count as stuck
+
+LIGHTS = {
+    "Completed": "green",
+    "Exempted": "green",
+    "Completed: overdue": "yellow",
+    "Pending: city review": "yellow",
+    "Pending: corrections": "yellow",
+    "Pending: other": "yellow",
+    None: "yellow",  # no record
+    "Pending: corrections >1y": "red",
+    "Pending: stalled": "red",
+    "Canceled": "red",
+}
+LIGHT_ORDER = ["green", "yellow", "red"]
+
+
+def days_since(ms):
+    """Days from an ArcGIS date (milliseconds) to today, None if missing."""
+    if ms is None:
+        return None
+    return (date.today() - datetime.fromtimestamp(ms / 1000).date()).days
+
+
+def latest_record(records):
+    """Record of the latest cycle; on a tie, the best status."""
+    return max(
+        records,
+        key=lambda r: (
+            r["RecertificateYear"] or 0,
+            PRIORITY.get(r["CertificationStatus"], -1),
+        ),
+    )
+
+
+def recert_label(r):
+    """Label of one recert record (a key of LIGHTS), dates must still be in ms."""
+    status = r["CertificationStatus"]
+    if status == "Completed" and (r["RecertificateYear"] or 0) + 10 < THIS_YEAR:
+        return "Completed: overdue"
+    if status == "Pending":
+        group = PENDING_GROUPS.get(r["PlanStatus"], "other")
+        days = days_since(r["PlanStatusDate"])
+        if group == "corrections" and days is not None and days > STUCK_DAYS:
+            group = "corrections >1y"
+        return f"Pending: {group}"
+    return status
 
 
 def query(url, where, fields, geometry=False):
@@ -211,6 +287,7 @@ def recert_records(building, fields):
             r["matched_on"] = "unit"
         else:
             r["matched_on"] = "address"
+        r["label"] = recert_label(r)
         for key in ("SubmittedDate", "PlanStatusDate"):
             r[key] = ms_to_date(r.get(key))
         records[r["OBJECTID"]] = r
@@ -218,15 +295,28 @@ def recert_records(building, fields):
 
 
 def recert_by_tower(building, records):
-    """Latest recertification of each tower, None if there is no record."""
-    latest = {}
-    for r in sorted(records, key=lambda r: r["RecertificateYear"] or 0):
-        latest[norm_address(r["Address"])] = {
-            "status_date": r["PlanStatusDate"],
-            "year_due": r["RecertificateYear"],
-            "status": r["CertificationStatus"],
+    """Traffic light of each tower, from its latest recertification cycle."""
+    by_tower = defaultdict(list)
+    for r in records:
+        by_tower[norm_address(r["Address"])].append(r)
+    result = {}
+    for tower in building["towers"]:
+        tower_records = by_tower.get(norm_address(tower))
+        latest = latest_record(tower_records) if tower_records else None
+        label = latest["label"] if latest else None
+        result[tower] = {
+            "label": label or "no record",
+            "light": LIGHTS.get(label, "yellow"),
+            "year_due": latest["RecertificateYear"] if latest else None,
+            "status_date": latest["PlanStatusDate"] if latest else None,
+            "plan": latest["PlanNumber"] if latest else None,
         }
-    return {t: latest.get(norm_address(t)) for t in building["towers"]}
+    return result
+
+
+def building_light(towers):
+    """The building takes the worst light of its towers."""
+    return max((t["light"] for t in towers.values()), key=LIGHT_ORDER.index)
 
 
 if __name__ == "__main__":
@@ -237,5 +327,6 @@ if __name__ == "__main__":
     recert_fields = safe_fields(LAYERS["recert"], RECERT_FIELDS)
     building["recert"] = recert_records(building, recert_fields)
     building["recert_by_tower"] = recert_by_tower(building, building["recert"])
+    building["recert_light"] = building_light(building["recert_by_tower"])
     building["folios"] = building["folios"][:5]
     print(json.dumps(building, indent=2, ensure_ascii=False))
