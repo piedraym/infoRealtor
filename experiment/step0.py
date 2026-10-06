@@ -15,6 +15,7 @@ CITY = "https://gis.miami.gov/gis/rest/services"
 LAYERS = {
     "property": f"{COUNTY}/PaGISView_gdb/FeatureServer/0",
     "recert": f"{CITY}/SmartCities/Recertification_40Years/MapServer/0",
+    "ibuild_permits": f"{CITY}/Maps/iBuildPermits/MapServer/0",
     # "permits": f"{CITY}/Building_Permits_Since_2014/FeatureServer/0",
     # "open_violations": f"{COUNTY}/Open_Building_Violations/FeatureServer/0",
     # "closed_violations_5y": f"{COUNTY}/Closed_Building_Violations_(Past_5_years)/FeatureServer/0",
@@ -28,6 +29,7 @@ LAYERS = {
 LICENSES = {
     "recert": "Pendiente de verificar (servidor GIS de la Ciudad)",
     "permits": "CC BY 4.0 (Ciudad de Miami)",
+    "ibuild_permits": "Pendiente de verificar (servidor GIS de la Ciudad)",
 }
 
 # Campos que pedimos.
