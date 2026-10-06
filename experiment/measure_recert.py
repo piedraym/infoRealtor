@@ -1,7 +1,10 @@
 """How many City of Miami condos have a recertification record, by age."""
 
+import csv
+import re
 from collections import Counter, defaultdict
 from datetime import date
+from pathlib import Path
 
 from step0 import LAYERS, base_address, norm_address, query
 
@@ -13,24 +16,92 @@ units = [
     for f in query(
         LAYERS["property"],
         "FOLIO LIKE '01%' AND PARENT_FOLIO IS NOT NULL",
-        ["FOLIO", "PARENT_FOLIO", "TRUE_SITE_ADDR", "TRUE_SITE_UNIT", "YEAR_BUILT"],
+        [
+            "FOLIO",
+            "PARENT_FOLIO",
+            "TRUE_SITE_ADDR",
+            "TRUE_SITE_UNIT",
+            "YEAR_BUILT",
+            "LEGAL",
+        ],
     )
 ]
 
-condos = defaultdict(lambda: {"folios": set(), "towers": set(), "years": []})
+condos = defaultdict(
+    lambda: {"folios": set(), "towers": set(), "years": [], "legal": None}
+)
 for u in units:
     c = condos[u["PARENT_FOLIO"]]
     c["folios"].add(u["FOLIO"])
     c["towers"].add(norm_address(base_address(u)))
     if u["YEAR_BUILT"]:  # 0 = unknown
         c["years"].append(u["YEAR_BUILT"])
+    if not c["legal"]:
+        c["legal"] = u["LEGAL"]
 
-# 2. The whole recertification layer: only folios and addresses
+# 2. The whole recertification layer
 recert = [
-    f["attributes"] for f in query(LAYERS["recert"], "1=1", ["FolioNumber", "Address"])
+    f["attributes"]
+    for f in query(
+        LAYERS["recert"],
+        "1=1",
+        [
+            "FolioNumber",
+            "Address",
+            "CertificationStatus",
+            "RecertificateYear",
+            "PlanStatus",
+        ],
+    )
 ]
-recert_folios = {r["FolioNumber"] for r in recert}
-recert_addresses = {norm_address(r["Address"]) for r in recert}
+recert_by_folio = defaultdict(list)
+recert_by_address = defaultdict(list)
+for r in recert:
+    recert_by_folio[r["FolioNumber"]].append(r)
+    recert_by_address[norm_address(r["Address"])].append(r)
+
+# When records share the latest year, the best status wins
+PRIORITY = {"Completed": 3, "Exempted": 2, "Pending": 1, "Canceled": 0}
+
+PENDING_GROUPS = {
+    "In Review": "city review",
+    "Prescreen": "city review",
+    "Submitted": "city review",
+    "Approved": "city review",
+    "Permit Issued": "city review",
+    "Final": "city review",
+    "Applicant Corrections": "corrections",
+    "Prescreen Corrections": "corrections",
+    "Applicant Upload": "corrections",
+    "Incomplete": "corrections",
+    "Cancelled": "stalled",
+    "Expired": "stalled",
+    "Inactive": "stalled",
+    "Hold": "stalled",
+}
+
+
+def condo_status(parent, c):
+    """Status of the latest recertification cycle, None if there is no record."""
+    records = list(recert_by_folio[parent])
+    for folio in c["folios"]:
+        records += recert_by_folio[folio]
+    for tower in c["towers"]:
+        records += recert_by_address[tower]
+    if not records:
+        return None
+    latest = max(
+        records,
+        key=lambda r: (
+            r["RecertificateYear"] or 0,
+            PRIORITY.get(r["CertificationStatus"], -1),
+        ),
+    )
+    status = latest["CertificationStatus"]
+    if status == "Pending":
+        group = PENDING_GROUPS.get(latest["PlanStatus"], "other")
+        return f"Pending: {group}"
+    return status
 
 
 def age_group(age):
@@ -54,22 +125,56 @@ def size_group(units):
 # 3. Does each condo have a record, by folio or by tower address?
 by_age = defaultdict(Counter)
 by_size = defaultdict(Counter)  # only 40+ condos
+missing = []
 for parent, c in condos.items():
     age = THIS_YEAR - min(c["years"]) if c["years"] else None
-    has_record = (
-        parent in recert_folios
-        or bool(c["folios"] & recert_folios)
-        or bool(c["towers"] & recert_addresses)
-    )
-    result = "with record" if has_record else "no record"
+    status = condo_status(parent, c)
+    result = status or "no record"
     by_age[age_group(age)][result] += 1
     if age_group(age) == "40+":
         by_size[size_group(len(c["folios"]))][result] += 1
+    if age_group(age) == "40+" and len(c["folios"]) > 10 and status is None:
+        m = re.match(r"^(.*?)\s+UNIT\b", c["legal"] or "")
+        missing.append(
+            {
+                "parent_folio": parent,
+                "name": m.group(1) if m else (c["legal"] or "")[:40],
+                "year": min(c["years"]),
+                "units": len(c["folios"]),
+                "towers": " | ".join(sorted(c["towers"])),
+            }
+        )
+
 
 print(f"{len(units)} units, {len(condos)} condos\n")
+COLUMNS = (
+    "Completed",
+    "Exempted",
+    "Pending: city review",
+    "Pending: corrections",
+    "Pending: stalled",
+    "Pending: other",
+    "Canceled",
+    "no record",
+)
 print("By age:")
 for group in ("40+", "30-39", "<30", "unknown"):
-    print(f"  {group:8} {dict(by_age[group])}")
+    print(f"  {group:8} " + "  ".join(f"{k}: {by_age[group][k]}" for k in COLUMNS))
 print("\n40+ condos by number of units:")
 for group in ("1-10", "11-50", "51+"):
-    print(f"  {group:8} {dict(by_size[group])}")
+    print(f"  {group:8} " + "  ".join(f"{k}: {by_size[group][k]}" for k in COLUMNS))
+
+missing.sort(key=lambda r: -r["units"])
+out = Path(__file__).parent / "out" / "no_record_11plus.csv"
+out.parent.mkdir(exist_ok=True)
+with out.open("w", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=missing[0].keys())
+    writer.writeheader()
+    writer.writerows(missing)
+
+
+print(f"\n40+ condos with 11+ units and no record: {len(missing)} -> {out}")
+for r in missing:
+    print(
+        f"  {r['parent_folio']}  {r['units']:>5}  {r['year']}  {r['name'][:30]:30}  {r['towers'][:60]}"
+    )
