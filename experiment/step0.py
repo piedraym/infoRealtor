@@ -20,7 +20,7 @@ LAYERS = {
     # "open_violations": f"{COUNTY}/Open_Building_Violations/FeatureServer/0",
     # "closed_violations_5y": f"{COUNTY}/Closed_Building_Violations_(Past_5_years)/FeatureServer/0",
     "flood": f"{COUNTY}/FEMAFloodZone_gdb/FeatureServer/0",
-    # "shoreline": f"{COUNTY}/Shoreline_gdb/FeatureServer/0",
+    "shoreline": f"{COUNTY}/Shoreline_gdb/FeatureServer/0",
 }
 
 # Licencias: las de la Ciudad están publicadas como CC BY 4.0 (uso comercial
@@ -31,6 +31,7 @@ LICENSES = {
     "permits": "CC BY 4.0 (Ciudad de Miami)",
     "ibuild_permits": "Pendiente de verificar (servidor GIS de la Ciudad)",
     "flood": "Pendiente de verificar (condado)",
+    "shoreline": "Pendiente de verificar (condado)",
 }
 
 # Campos que pedimos.
@@ -133,7 +134,7 @@ def ms_to_date(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date().isoformat()
 
 
-def point_query(url, x, y, fields):
+def point_query(url, x, y, fields, distance=None):
     """Features of a layer that contain the point (longitude, latitude)."""
     params = {
         "geometry": f"{x},{y}",
@@ -144,6 +145,9 @@ def point_query(url, x, y, fields):
         "returnGeometry": "false",
         "f": "json",
     }
+    if distance:
+        params["distance"] = distance
+        params["units"] = "esriSRUnit_StatuteMile"
     r = requests.get(f"{url}/query", params=params, timeout=60)
     r.raise_for_status()
     data = r.json()
@@ -370,15 +374,21 @@ def open_permits(building, fields):
     )
 
 
-def flood_zone(building):
-    """FEMA flood zone at the building's location (master folio, else first unit)."""
+def building_point(building):
+    """Location of the building: master folio, else the first unit."""
     folio = (
         building["parent_folio"] if building["master_in_pa"] else building["folios"][0]
     )
     found = query(LAYERS["property"], f"FOLIO='{folio}'", ["FOLIO"], geometry=True)
     if not found or not found[0].get("geometry"):
         return None
-    point = found[0]["geometry"]
+    return found[0]["geometry"]
+
+
+def flood_zone(point):
+    """FEMA flood zone at the building's location."""
+    if not point:
+        return None
     zones = point_query(
         LAYERS["flood"], point["x"], point["y"], ["FZONE", "ZONESUBTY", "ELEV"]
     )
@@ -394,9 +404,24 @@ def flood_zone(building):
     }
 
 
+COAST_BANDS = (0.25, 0.5, 1, 2, 3)  # miles
+
+
+def coast_distance(point):
+    """Smallest band (miles) with shoreline nearby, and whether it is within 3 miles."""
+    if not point:
+        return None
+    for miles in COAST_BANDS:
+        if point_query(
+            LAYERS["shoreline"], point["x"], point["y"], ["OBJECTID"], distance=miles
+        ):
+            return {"within_miles": miles, "within_3_miles": True}
+    return {"within_miles": None, "within_3_miles": False}
+
+
 if __name__ == "__main__":
     fields = safe_fields(LAYERS["property"], PROPERTY_FIELDS)
-    building = building_summary("0132310480001", fields)
+    building = building_summary("0140020280001", fields)
     if not building:
         raise SystemExit("Sin resultados para ese folio")
     recert_fields = safe_fields(LAYERS["recert"], RECERT_FIELDS)
@@ -405,6 +430,8 @@ if __name__ == "__main__":
     building["recert_light"] = building_light(building["recert_by_tower"])
     permit_fields = safe_fields(LAYERS["ibuild_permits"], PERMIT_FIELDS)
     building["open_permits"] = open_permits(building, permit_fields)
-    building["flood"] = flood_zone(building)
+    point = building_point(building)
+    building["flood"] = flood_zone(point)
+    building["coast"] = coast_distance(point)
     building["folios"] = building["folios"][:5]
     print(json.dumps(building, indent=2, ensure_ascii=False))
