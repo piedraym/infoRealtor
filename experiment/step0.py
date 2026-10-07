@@ -185,6 +185,12 @@ PENDING_GROUPS = {
 
 STUCK_DAYS = 365  # corrections older than this count as stuck
 
+# Recertification schedule. ESTIMATE with the strictest rule (County Sec. 8-11(f)):
+# change these when the City confirms which one it applies (its web page says 40).
+FIRST_RECERT_AGE = 30
+FIRST_RECERT_AGE_COASTAL = 25  # 3+ floors within 3 miles of the coast
+RECERT_EVERY = 10
+
 LIGHTS = {
     "Completed": "green",
     "Exempted": "green",
@@ -419,6 +425,33 @@ def coast_distance(point):
     return {"within_miles": None, "within_3_miles": False}
 
 
+def first_recert_age(building):
+    """Age of the first recertification: 25 for coastal buildings of 3+ floors."""
+    coastal = (building.get("coast") or {}).get("within_3_miles")
+    floors = building["estimate_floors"]
+    if coastal and (floors is None or floors >= 3):  # unknown floors: be strict
+        return FIRST_RECERT_AGE_COASTAL
+    return FIRST_RECERT_AGE
+
+
+def next_recert(building, tower):
+    """Year the tower's next recertification is due, estimated."""
+    label = tower["label"]
+    if label == "Exempted":
+        return None
+    if label.startswith("Completed"):
+        year, basis = tower["year_due"] + RECERT_EVERY, "last recert + 10"
+    elif tower["year_due"]:  # Pending or Canceled: this cycle is still open
+        year, basis = tower["year_due"], "open cycle"
+    else:  # no record
+        built = building["year_of_construction"]
+        if not built:
+            return None
+        age = first_recert_age(building)
+        year, basis = built + age, f"year built + {age}"
+    return {"year": year, "overdue": year < THIS_YEAR, "basis": basis}
+
+
 if __name__ == "__main__":
     fields = safe_fields(LAYERS["property"], PROPERTY_FIELDS)
     building = building_summary("0140020280001", fields)
@@ -433,5 +466,7 @@ if __name__ == "__main__":
     point = building_point(building)
     building["flood"] = flood_zone(point)
     building["coast"] = coast_distance(point)
+    for tower in building["recert_by_tower"].values():
+        tower["next_due"] = next_recert(building, tower)
     building["folios"] = building["folios"][:5]
     print(json.dumps(building, indent=2, ensure_ascii=False))
