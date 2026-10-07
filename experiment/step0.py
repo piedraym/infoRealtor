@@ -71,6 +71,16 @@ RECERT_FIELDS = [
     "OBJECTID",
 ]
 
+PERMIT_FIELDS = [
+    "PermitNumber",
+    "PermitStatus",
+    "PermitType",
+    "ScopeOfWork",
+    "PermitIssuedDate",
+]
+
+BAD_PERMIT_STATUSES = ("Hold", "Expired", "Revoked")
+
 
 def layer_info(url):
     r = requests.get(url, params={"f": "json"}, timeout=30)
@@ -321,14 +331,35 @@ def building_light(towers):
     return max((t["light"] for t in towers.values()), key=LIGHT_ORDER.index)
 
 
+def open_permits(building, fields):
+    """Building-level permits left in Hold, Expired or Revoked, newest first."""
+    statuses = ",".join(f"'{s}'" for s in BAD_PERMIT_STATUSES)
+    rows = query(
+        LAYERS["ibuild_permits"],
+        f"FOLIO='{building['parent_folio']}' AND PermitStatus IN ({statuses})"
+        " AND PermitNumber IS NOT NULL",
+        fields,
+    )
+    permits = {}
+    for f in rows:
+        p = f["attributes"]
+        p["PermitIssuedDate"] = ms_to_date(p["PermitIssuedDate"])
+        permits[p["PermitNumber"]] = p  # the layer has exact duplicate rows
+    return sorted(
+        permits.values(), key=lambda p: p["PermitIssuedDate"] or "", reverse=True
+    )
+
+
 if __name__ == "__main__":
     fields = safe_fields(LAYERS["property"], PROPERTY_FIELDS)
-    building = building_summary("0131341070001", fields)
+    building = building_summary("0132310480001", fields)
     if not building:
         raise SystemExit("Sin resultados para ese folio")
     recert_fields = safe_fields(LAYERS["recert"], RECERT_FIELDS)
     building["recert"] = recert_records(building, recert_fields)
     building["recert_by_tower"] = recert_by_tower(building, building["recert"])
     building["recert_light"] = building_light(building["recert_by_tower"])
+    permit_fields = safe_fields(LAYERS["ibuild_permits"], PERMIT_FIELDS)
+    building["open_permits"] = open_permits(building, permit_fields)
     building["folios"] = building["folios"][:5]
     print(json.dumps(building, indent=2, ensure_ascii=False))
