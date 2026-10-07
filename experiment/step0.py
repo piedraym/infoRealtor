@@ -19,7 +19,7 @@ LAYERS = {
     # "permits": f"{CITY}/Building_Permits_Since_2014/FeatureServer/0",
     # "open_violations": f"{COUNTY}/Open_Building_Violations/FeatureServer/0",
     # "closed_violations_5y": f"{COUNTY}/Closed_Building_Violations_(Past_5_years)/FeatureServer/0",
-    # "flood": f"{COUNTY}/FEMAFloodZone_gdb/FeatureServer/0",
+    "flood": f"{COUNTY}/FEMAFloodZone_gdb/FeatureServer/0",
     # "shoreline": f"{COUNTY}/Shoreline_gdb/FeatureServer/0",
 }
 
@@ -30,6 +30,7 @@ LICENSES = {
     "recert": "Pendiente de verificar (servidor GIS de la Ciudad)",
     "permits": "CC BY 4.0 (Ciudad de Miami)",
     "ibuild_permits": "Pendiente de verificar (servidor GIS de la Ciudad)",
+    "flood": "Pendiente de verificar (condado)",
 }
 
 # Campos que pedimos.
@@ -130,6 +131,25 @@ def ms_to_date(ms):
     if ms is None:
         return None
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date().isoformat()
+
+
+def point_query(url, x, y, fields):
+    """Features of a layer that contain the point (longitude, latitude)."""
+    params = {
+        "geometry": f"{x},{y}",
+        "geometryType": "esriGeometryPoint",
+        "inSR": 4326,
+        "spatialRel": "esriSpatialRelIntersects",
+        "outFields": ",".join(fields),
+        "returnGeometry": "false",
+        "f": "json",
+    }
+    r = requests.get(f"{url}/query", params=params, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(data["error"])
+    return [f["attributes"] for f in data["features"]]
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +370,30 @@ def open_permits(building, fields):
     )
 
 
+def flood_zone(building):
+    """FEMA flood zone at the building's location (master folio, else first unit)."""
+    folio = (
+        building["parent_folio"] if building["master_in_pa"] else building["folios"][0]
+    )
+    found = query(LAYERS["property"], f"FOLIO='{folio}'", ["FOLIO"], geometry=True)
+    if not found or not found[0].get("geometry"):
+        return None
+    point = found[0]["geometry"]
+    zones = point_query(
+        LAYERS["flood"], point["x"], point["y"], ["FZONE", "ZONESUBTY", "ELEV"]
+    )
+    if not zones:
+        return None
+    z = zones[0]
+    return {
+        "zone": z["FZONE"],
+        "subtype": (z["ZONESUBTY"] or "").strip() or None,
+        "base_flood_elevation_ft": z["ELEV"]
+        if z["ELEV"] not in (None, -9999)
+        else None,
+    }
+
+
 if __name__ == "__main__":
     fields = safe_fields(LAYERS["property"], PROPERTY_FIELDS)
     building = building_summary("0132310480001", fields)
@@ -361,5 +405,6 @@ if __name__ == "__main__":
     building["recert_light"] = building_light(building["recert_by_tower"])
     permit_fields = safe_fields(LAYERS["ibuild_permits"], PERMIT_FIELDS)
     building["open_permits"] = open_permits(building, permit_fields)
+    building["flood"] = flood_zone(building)
     building["folios"] = building["folios"][:5]
     print(json.dumps(building, indent=2, ensure_ascii=False))
