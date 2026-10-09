@@ -1,4 +1,5 @@
 .venv/
 __pycache__/
 experiment/out/
+experiment/data/
 .DS_Store
