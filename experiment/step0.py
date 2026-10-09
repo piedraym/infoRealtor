@@ -83,6 +83,46 @@ PERMIT_FIELDS = [
 
 BAD_PERMIT_STATUSES = ("Hold", "Expired", "Revoked")
 
+NAME_NOISE = {
+    "A",
+    "THE",
+    "CONDO",
+    "CONDOMINIUM",
+    "CONDOMINIUMS",
+    "OF",
+    "NO",
+    "AT",
+    "ASSN",
+    "ASSOCIATION",
+    "INC",
+}
+
+FUZZY_MIN = 85  # checked by hand: all matches at 85+ were right
+
+NUMBERS = {
+    "ONE": "1",
+    "TWO": "2",
+    "THREE": "3",
+    "FOUR": "4",
+    "FIVE": "5",
+    "I": "1",
+    "II": "2",
+    "III": "3",
+    "IV": "4",
+    "V": "5",
+}
+
+
+def fuzzy_name(text):
+    """match_name with numbers in one spelling: 'PHASE TWO' / 'PHASE II' -> 'PHASE 2'."""
+    return " ".join(NUMBERS.get(w, w) for w in match_name(text).split())
+
+
+def match_name(text):
+    """Condo name without punctuation and filler words: 'GRAND, THE' -> 'GRAND'."""
+    words = re.sub(r"[^A-Z0-9 ]", " ", (text or "").upper()).split()
+    return " ".join(w for w in words if w not in NAME_NOISE)
+
 
 def layer_info(url):
     r = requests.get(url, params={"f": "json"}, timeout=30)
