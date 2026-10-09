@@ -1,7 +1,9 @@
+import csv
 import json
 import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import requests
 
@@ -11,6 +13,8 @@ import requests
 
 COUNTY = "https://services.arcgis.com/8Pc9XBTAsYuxx9Ny/ArcGIS/rest/services"
 CITY = "https://gis.miami.gov/gis/rest/services"
+
+OUT = Path(__file__).parent / "out"  # CSVs written by match_condos.py and match_sirs.py
 
 LAYERS = {
     "property": f"{COUNTY}/PaGISView_gdb/FeatureServer/0",
@@ -492,9 +496,38 @@ def next_recert(building, tower):
     return {"year": year, "overdue": year < THIS_YEAR, "basis": basis}
 
 
+def dbpr_info(building):
+    """DBPR projects, Delinquent status and SIRS reports, from match_condos.py and match_sirs.py."""
+    parent = building["parent_folio"]
+    with (OUT / "condo_match.csv").open() as f:
+        projects = [
+            {
+                "number": r["project_number"],
+                "name": r["dbpr_name"],
+                "status": r["dbpr_status"],
+            }
+            for r in csv.DictReader(f)
+            if r["parent_folio"] == parent and r["project_number"]
+        ]
+    with (OUT / "sirs_by_folio.csv").open() as f:
+        sirs = next(
+            (
+                r["sirs_periods"]
+                for r in csv.DictReader(f)
+                if r["parent_folio"] == parent
+            ),
+            None,
+        )
+    return {
+        "projects": projects,
+        "delinquent": any(p["status"] == "Delinquent" for p in projects),
+        "sirs_reported": sirs,
+    }
+
+
 if __name__ == "__main__":
     fields = safe_fields(LAYERS["property"], PROPERTY_FIELDS)
-    building = building_summary("0140020280001", fields)
+    building = building_summary("0141370780001", fields)
     if not building:
         raise SystemExit("Sin resultados para ese folio")
     recert_fields = safe_fields(LAYERS["recert"], RECERT_FIELDS)
@@ -508,5 +541,6 @@ if __name__ == "__main__":
     building["coast"] = coast_distance(point)
     for tower in building["recert_by_tower"].values():
         tower["next_due"] = next_recert(building, tower)
+    building["dbpr"] = dbpr_info(building)
     building["folios"] = building["folios"][:5]
     print(json.dumps(building, indent=2, ensure_ascii=False))
